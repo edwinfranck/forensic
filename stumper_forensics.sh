@@ -31,6 +31,39 @@ export LC_ALL=C
 START=""; END=""; TARGET_USER=""; OUT=""; DEEP=0; QUICK=0; MAX_REPOS=200
 EXTRA_ROOTS=(); EXTRA_SIGS=()
 
+usage() {
+  cat <<'USAGE'
+stumper_forensics.sh — releve forensique LECTURE SEULE sur poste etudiant
+
+But : etablir si le sujet d'un stumper, ou une implementation de ce sujet,
+      existait sur la machine AVANT l'ouverture de l'epreuve.
+      Le script ne conclut pas : il produit des faits horodates
+      (Access / Modify / Change / Birth), des empreintes et une chronologie.
+
+Il n'ecrit RIEN en dehors de son dossier de rapport. Aucune suppression,
+aucune modification, aucun acces reseau.
+
+Usage :
+  curl -sL <url>/stumper_forensics.sh | sudo bash -s -- \
+       --start '2026-09-16 10:00' --end '2026-09-16 14:00' \
+       --out /media/staff/CLE/releve-poste12 --deep
+
+  --start TS     debut de l'epreuve (tout format accepte par date -d). REQUIS en pratique.
+  --end   TS     fin de l'epreuve (defaut : maintenant)
+  --user  NAME   compte a examiner (defaut : SUDO_USER)
+  --out   DIR    dossier du rapport — sur la cle USB du staff
+  --root  DIR    racine supplementaire a balayer (repetable : cles USB, /mnt/...)
+  --deep         sondes lourdes : inodes supprimes (debugfs), journal ext4
+  --quick        saute la recherche par contenu sur tout le disque
+  --max-repos N  plafond de depots git examines en detail (defaut 200)
+  --signature S  motif de contenu supplementaire (repetable)
+
+Procedure complete : PROCEDURE.md
+  etudiant present et informe, second membre du staff temoin,
+  rapport ecrit hors du disque du poste, proces-verbal signe.
+USAGE
+}
+
 while [ $# -gt 0 ]; do
   case "$1" in
     --start)     START="${2:-}"; shift 2 ;;
@@ -42,7 +75,7 @@ while [ $# -gt 0 ]; do
     --deep)      DEEP=1; shift ;;
     --quick)     QUICK=1; shift ;;
     --max-repos) MAX_REPOS="${2:-200}"; shift 2 ;;
-    -h|--help)   sed -n '2,30p' "$0"; exit 0 ;;
+    -h|--help)   usage; exit 0 ;;
     *)           echo "option inconnue : $1" >&2; exit 1 ;;
   esac
 done
