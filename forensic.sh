@@ -15,7 +15,7 @@ VERSION="2.0"
 
 # ─────────────────────────────────────────────────────────────── paramètres
 START=""; END=""; TARGET_USER=""; OUT=""
-DEEP=0; QUICK=0; ALL_FS=0; MAX_REPOS=200; EXP_YEAR=""; EXP_MODULE=""
+DEEP=0; QUICK=0; ALL_FS=0; MAX_REPOS=200; EXP_YEAR=""; EXP_MODULE=""; WITH_PV=0
 EXTRA_ROOTS=(); SIGS=(); NAMES=(); REPOS_REF=()
 
 usage() {
@@ -44,8 +44,10 @@ CIBLAGE (tout est optionnel — sans rien, le script reste générique)
 MARQUEURS DE PROVENANCE (analyse du code lui-même)
   --year YYYY       année attendue dans l'en-tête EPITECH
                     (défaut : année de --start)
-  --module CODE     module attendu, ex. G-CPE-210. Le script signale tout
-                    fichier qui porte un autre module (B-CPE-210, B-PSU-100…)
+  --module CODE     module attendu, ex. G-CPE-210. Borne la recherche à ce
+                    module et signale tout fichier qui en porte un autre.
+  --pv              ajoute au rapport les objections à prévoir et le
+                    procès-verbal (absents par défaut)
 
 PROFONDEUR
   --deep            inodes supprimés (debugfs), journal ext4, instantanés btrfs
@@ -77,6 +79,7 @@ while [ $# -gt 0 ]; do
     --max-repos)  MAX_REPOS="${2:-200}"; shift 2 ;;
     --year)       EXP_YEAR="${2:-}"; shift 2 ;;
     --module)     EXP_MODULE="${2:-}"; shift 2 ;;
+    --pv)         WITH_PV=1; shift ;;
     -h|--help)    usage; exit 0 ;;
     *) echo "option inconnue : $1" >&2; echo "  --help pour l'aide" >&2; exit 1 ;;
   esac
@@ -146,12 +149,22 @@ derive_from_repo() {
   local r="$1" f base sym
   [ -d "$r" ] || { warn "dépôt introuvable : $r"; return; }
   step "analyse du rendu $(basename "$r")"
+  # noms trop répandus : ils matchent tous les projets du disque, donc ils
+  # ne discriminent rien. On ne garde que les noms propres au rendu.
+  local GENERIC='^(main|utils|util|my|tools|tool|common|config|types|error|errors|init|parse|parser|print|printer|display|str|string|list|helper|helpers|lib|core|app|test|tests)\.(c|h|cpp|hpp|py)$|^(Makefile|CMakeLists\.txt|makefile)$'
+  local kept=0 skipped=0
   while IFS= read -r f; do
     base="$(basename "$f")"
     case "$base" in
-      *.c|*.h|*.cpp|*.hpp|*.py|Makefile|CMakeLists.txt) NAMES+=("$base") ;;
+      *.c|*.h|*.cpp|*.hpp|*.py)
+        if printf '%s' "$base" | grep -qE "$GENERIC"; then
+          skipped=$((skipped+1))
+        else
+          NAMES+=("$base"); kept=$((kept+1))
+        fi ;;
     esac
   done < <(git -C "$r" ls-files 2>/dev/null || find "$r" -maxdepth 3 -type f)
+  [ "$skipped" -gt 0 ] && step "  $kept nom(s) distinctif(s) retenu(s), $skipped générique(s) écarté(s)"
   # symboles : noms de fonctions et macros définis dans le rendu
   while IFS= read -r sym; do
     [ ${#sym} -ge 5 ] && SIGS+=("$sym")
@@ -187,6 +200,22 @@ if [ ${#REPOS_REF[@]} -eq 0 ]; then
         t=$(git -C "$r" log --all --format=%at 2>/dev/null | sort -n | tail -1)
         printf '%s\t%s\n' "${t:-0}" "$r"
       done | sort -rn | cut -f2-)
+    # code module du dépôt le plus récent : on s'y tient. Sur un poste de
+    # correcteur, cela écarte les projets d'autres modules (PSU, RPG, OOP…).
+    if [ -z "$EXP_MODULE" ]; then
+      EXP_MODULE=$(basename "${DETECTED[0]}" | grep -oE '\b[A-Z]-[A-Z]{2,4}-[0-9]{3}\b' | head -1)
+    fi
+    if [ -n "$EXP_MODULE" ]; then
+      MKEEP=()
+      for r in "${DETECTED[@]}"; do
+        basename "$r" | grep -q "$EXP_MODULE" && MKEEP+=("$r")
+      done
+      if [ ${#MKEEP[@]} -gt 0 ]; then
+        [ ${#MKEEP[@]} -lt ${#DETECTED[@]} ] && \
+          say "  module de l'épreuve : $EXP_MODULE — $(( ${#DETECTED[@]} - ${#MKEEP[@]} )) dépôt(s) d'autres modules écarté(s)"
+        DETECTED=("${MKEEP[@]}")
+      fi
+    fi
     NDET=${#DETECTED[@]}
     # une épreuve tient dans une journée : on ne garde que les dépôts travaillés
     # dans les 48 h du plus récent. Écarte les projets au long cours.
@@ -525,7 +554,13 @@ done_phase "$i fichier(s) horodaté(s) — $NPRE inode(s) antérieur(s), $NIMP i
 # ═══════════════════════════════════════════════════════════════════ phase 6
 phase "Dépôts git présents sur le poste"
 
-mapfile -t GITS < <(find "${ROOTS[@]}" -xdev -maxdepth 6 -type d -name .git 2>/dev/null | head -"$MAX_REPOS")
+if [ -n "$EXP_MODULE" ]; then
+  mapfile -t GITS < <(find "${ROOTS[@]}" -xdev -maxdepth 6 -type d -name .git 2>/dev/null \
+                      | grep -i "$EXP_MODULE" | head -"$MAX_REPOS")
+  step "limité aux dépôts du module $EXP_MODULE"
+else
+  mapfile -t GITS < <(find "${ROOTS[@]}" -xdev -maxdepth 6 -type d -name .git 2>/dev/null | head -"$MAX_REPOS")
+fi
 step "${#GITS[@]} dépôt(s) trouvé(s)"
 ng=0
 for g in "${GITS[@]:-}"; do
@@ -676,16 +711,29 @@ for r in "${REPOS_REF[@]}"; do
          | grep -vE '^(printf|sprintf|fprintf|snprintf|strcmp|strlen|strdup|malloc|memset|memcpy|fgets|fopen|fclose|fwrite|scanf|sscanf|isalpha|islower|isupper|strtol|opendir|readdir|closedir|unlink|write|main)$' \
          | sort -u | head -25)
   [ -n "$syms" ] || continue
-  SRE=$(printf '%s|' $syms | sed 's/|$//')
-  step "$rname : recherche de ses symboles hors du dépôt"
+  # un symbole présent dans beaucoup de fichiers ne discrimine rien
+  # (parse_options, read_file… existent dans openvpn comme ailleurs).
+  # On mesure sa rareté sur le corpus et on ne garde que les rares.
+  rare=""
+  for sym in $syms; do
+    df=$(grep -lE "\\b$sym\\b" $(cat "$CAND") 2>/dev/null | wc -l)
+    [ "$df" -le 2 ] && rare="$rare $sym"
+  done
+  rare=$(printf '%s' "$rare" | tr -s ' ')
+  if [ -z "$(printf '%s' "$rare" | tr -d ' ')" ]; then
+    step "$rname : aucun symbole discriminant (tous trop répandus)"
+    continue
+  fi
+  SRE=$(printf '%s|' $rare | sed 's/|$//')
+  step "$rname : $(printf '%s' "$rare" | wc -w) symbole(s) discriminant(s) recherchés hors du dépôt"
   while IFS= read -r f; do
     case "$(cd "$(dirname "$f")" 2>/dev/null && pwd -P)/" in "$rreal"/*) continue ;; esac
-    nm=$(grep -coE "\b($SRE)\b" "$f" 2>/dev/null); nm=${nm:-0}
+    nm=$(grep -ohE "\b($SRE)\b" "$f" 2>/dev/null | sort -u | wc -l); nm=${nm:-0}
     [ "$nm" -ge 3 ] || continue
     st=$(stat -c '%W|%Y' "$f" 2>/dev/null) || continue
     bE=${st%|*}; mE=${st#*|}
     ant="non"; [ "$mE" -lt "$START_EPOCH" ] && ant="OUI"
-    printf 'SOURCE(%s symboles)\t%s\t%s\t%s\t%s\t%s\n' "$nm" \
+    printf 'SOURCE(%s symboles propres)\t%s\t%s\t%s\t%s\t%s\n' "$nm" \
       "$([ "$bE" -gt 0 ] 2>/dev/null && date -d "@$bE" '+%F %T' || echo '-')" \
       "$(date -d "@$mE" '+%F %T')" "$ant" "$rname" "$f" >> "$HORS"
     N_HORS=$((N_HORS+1))
@@ -1043,37 +1091,22 @@ ANALYSE="$OUT/analyse.txt"
     echo "   Tableau complet : chronologie.tsv"
   fi
   echo
+  if [ "$WITH_PV" -eq 1 ]; then
   echo "───────────────────────────────────────────────────────────────────────"
-  echo " 5. CE QUE CE DOCUMENT N'ETABLIT PAS"
+  echo " 5. LIMITES ET PROCES-VERBAL"
   echo "───────────────────────────────────────────────────────────────────────"
   echo
-  echo "   Ce releve NE CONCLUT PAS. Il presente des faits horodates."
-  echo "   La conclusion est une decision humaine, prise en soutenance,"
-  echo "   avec l'etudiant present."
-  echo
-  echo "   Objections legitimes a prevoir :"
-  echo "     - \"J'ai copie mes fichiers depuis ma cle.\"  Recevable : ce qui"
-  echo "       compte est la date du CONTENU sur la cle. La relever aussi"
-  echo "       (--root /media/...)."
-  echo "     - \"Un cp -p garde les vieilles dates.\"  Exact, et c'est"
-  echo "       precisement ce que IMPORTE-DATES-PRESERVEES designe."
-  echo "     - \"L'horloge etait fausse.\"  Verifiable : voir RAPPORT.md."
-  echo "     - \"Ces dates viennent de votre scan.\"  Non pour Modify, Change"
-  echo "       et Birth. Possiblement oui pour Access : c'est dit."
-  echo
-  echo "   L'absence de trace ne prouve rien : un rm suivi d'ecritures, ou un"
-  echo "   travail fait sur une autre machine, ne laisse rien derriere lui."
-  echo
-  echo "───────────────────────────────────────────────────────────────────────"
-  echo " 6. EMPREINTES — PROCES-VERBAL"
-  echo "───────────────────────────────────────────────────────────────────────"
+  echo "   Ce releve date des fichiers ; il ne dit pas qui a ecrit le code."
+  echo "   Objections a prevoir : copie depuis une cle (relever la cle avec"
+  echo "   --root), cp -p qui preserve les dates (c'est ce que designe"
+  echo "   IMPORTE-DATES-PRESERVEES), horloge faussee (verifiable au journal)."
   echo
   ( cd "$OUT" && sha256sum RAPPORT.md chronologie.tsv candidats.txt 2>/dev/null | sed 's/^/   /' )
   echo
-  echo "   A faire signer : date, heure, lieu, numero du poste ; noms du staff"
-  echo "   present et de l'etudiant ; les empreintes ci-dessus ; la declaration"
-  echo "   de l'etudiant telle qu'il la formule."
+  echo "   A faire signer : date, heure, lieu, poste ; noms du staff et de"
+  echo "   l'etudiant ; les empreintes ci-dessus ; la declaration de l'etudiant."
   echo
+  fi
   echo "═══════════════════════════════════════════════════════════════════════"
 } > "$ANALYSE"
 

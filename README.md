@@ -30,6 +30,27 @@ Il lit le `Makefile` de chaque rendu et en extrait **le binaire cherché** :
 · 29 motifs de nom, 115 signatures de contenu
 ```
 
+## Ce que le relevé ne regarde pas
+
+Le script se borne au **module de l'épreuve**, déduit du nom des dépôts rendus. Sur un
+poste de correcteur qui héberge des centaines de dépôts, cela écarte d'emblée tout ce qui
+ne concerne pas l'épreuve :
+
+```
+module de l'épreuve : G-CPE-210 — 585 dépôt(s) d'autres modules écarté(s)
+26 rendus détectés, 4 retenu(s) (travaillés le 2026-09-16)
+```
+
+Les noms de fichiers trop répandus — `main.c`, `Makefile`, `utils.c`, `my.h` — sont
+**écartés du ciblage** : ils existent dans tous les projets et ne discriminent rien. Seuls
+les noms propres au rendu sont retenus, plus le binaire déclaré par le `Makefile`.
+
+De même, les symboles recherchés sont **calibrés sur leur rareté** dans le corpus : une
+fonction présente dans plus de deux fichiers n'est pas propre au rendu et n'est pas
+retenue. Sans cela, un `parse_options` fait remonter le code source d'OpenVPN.
+
+Résultat sur un poste réel : **47 fichiers candidats, relevé complet en 1 min 10**.
+
 ## Le rendu existe-t-il ailleurs sur le poste ?
 
 C'est la question qui compte, et le script y répond directement. Il cherche, **hors du
@@ -76,7 +97,8 @@ Sans `--repo`, il reste **générique** : sources tous langages, archives, PDF.
 | `--all` | balayer tout le disque (défaut : zones étudiant) |
 | `--out DIR` | dossier du rapport — sur la clé USB du staff de préférence |
 | `--year YYYY` | année attendue dans l'en-tête EPITECH (défaut : année de `--start`) |
-| `--module CODE` | module attendu, ex. `G-CPE-210` |
+| `--module CODE` | module de l'épreuve, ex. `G-CPE-210`. **Borne toute la recherche à ce module** ; déduit du nom des dépôts si absent |
+| `--pv` | ajoute les objections à prévoir et le procès-verbal (absents par défaut) |
 | `--deep` | inodes supprimés (`debugfs`), journal ext4, instantanés btrfs |
 | `--quick` | saute la recherche par contenu (~1 min au lieu de ~10) |
 
