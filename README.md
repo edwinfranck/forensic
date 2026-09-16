@@ -15,11 +15,38 @@ Relevé forensique **lecture seule** sur poste étudiant.
 git clone https://github.com/edwinfranck/forensic.git
 cd forensic
 chmod +x forensic.sh
-sudo ./forensic.sh --start '2026-09-16 10:00'
+sudo ./forensic.sh
 ```
 
-`--start` est la seule option obligatoire : sans l'heure d'ouverture de l'épreuve,
-aucun classement d'antériorité n'est possible.
+**Aucun argument n'est nécessaire.** Le script cherche les rendus Epitech sur le poste,
+en déduit la fenêtre de l'épreuve à partir de leur historique git, et ne demande l'heure
+que s'il n'y parvient pas. `--start '2026-09-16 10:00'` pour l'imposer.
+
+Il lit le `Makefile` de chaque rendu et en extrait **le binaire cherché** :
+
+```
+· binaire cherché : tictactoe  (déclaré par G-CPE-210-ABJ-2-1-stumper7-2)
+· binaire cherché : cesar      (déclaré par G-CPE-210-ABJ-2-1-stumper7-3)
+· 29 motifs de nom, 115 signatures de contenu
+```
+
+## Le rendu existe-t-il ailleurs sur le poste ?
+
+C'est la question qui compte, et le script y répond directement. Il cherche, **hors du
+dépôt rendu** :
+
+- le **binaire** que le `Makefile` déclare, compilé ailleurs ;
+- les **fonctions** définies par le rendu, retrouvées dans un autre fichier.
+
+```
+TYPE                   CONTENU DU          ANTERIEUR CHEMIN
+SOURCE(6 symboles)     2026-09-10 14:00:00 OUI       /home/etudiant/vieux/win.c
+BINAIRE                2026-09-10 14:05:00 OUI       /home/etudiant/vieux/tictactoe
+```
+
+Un exemplaire trouvé ailleurs **et antérieur à l'épreuve** est le fait le plus direct que
+ce relevé puisse produire. Rien trouvé est aussi un résultat : sur ce poste, le code du
+rendu n'existe qu'à un seul endroit.
 
 Le relevé affiche sa progression phase par phase — il ne reste jamais muet — et se
 termine sur un tableau de synthèse.

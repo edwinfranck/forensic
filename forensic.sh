@@ -82,12 +82,15 @@ while [ $# -gt 0 ]; do
   esac
 done
 
-[ -n "$START" ] || { echo "ERREUR : --start est obligatoire." >&2; echo; usage; exit 1; }
-START_EPOCH=$(date -d "$START" +%s 2>/dev/null) || { echo "ERREUR : --start illisible : $START" >&2; exit 1; }
+if [ -n "$START" ]; then
+  START_EPOCH=$(date -d "$START" +%s 2>/dev/null) || { echo "ERREUR : --start illisible : $START" >&2; exit 1; }
+else
+  START_EPOCH=""   # déduit plus bas des rendus détectés
+fi
 if [ -n "$END" ]; then
   END_EPOCH=$(date -d "$END" +%s 2>/dev/null) || { echo "ERREUR : --end illisible : $END" >&2; exit 1; }
 else
-  END_EPOCH=$(date +%s)
+  END_EPOCH=""
 fi
 
 # ─────────────────────────────────────────────────────────── compte examiné
@@ -98,8 +101,6 @@ fi
 HOMEDIR="$(getent passwd "$TARGET_USER" 2>/dev/null | cut -d: -f6)"
 [ -n "$HOMEDIR" ] || HOMEDIR="/home/$TARGET_USER"
 
-[ -n "$EXP_YEAR" ] || EXP_YEAR="$(date -d "@$START_EPOCH" +%Y)"
-
 OUT="${OUT:-./releve-$(hostname 2>/dev/null || echo poste)-$(date +%Y%m%d-%H%M%S)}"
 mkdir -p "$OUT/copies" || { echo "ERREUR : impossible d'écrire dans $OUT" >&2; exit 1; }
 OUT="$(cd "$OUT" && pwd)"
@@ -107,7 +108,7 @@ REPORT="$OUT/RAPPORT.md"; TIMELINE="$OUT/chronologie.tsv"; CAND="$OUT/candidats.
 : > "$REPORT"; : > "$CAND"
 
 # ───────────────────────────────────────────────────── affichage et journal
-T0=$(date +%s); PHASE_T0=$T0; PHASE_N=0; NPHASES=12
+T0=$(date +%s); PHASE_T0=$T0; PHASE_N=0; NPHASES=13
 is_tty() { [ -t 2 ]; }
 c() { is_tty && printf '\033[%sm' "$1" >&2 || true; }
 say()  { printf '%s\n' "$*" >&2; }
@@ -163,6 +164,103 @@ derive_from_repo() {
 }
 
 # ─────────────────────────────────────────────────────────── en-tête rapport
+# ───────────────────────────────── autodétection : rendus + fenêtre d'épreuve
+say ""
+c '1;37'; say " forensic.sh v$VERSION — relevé lecture seule"; c '0'
+hr
+
+if [ ${#REPOS_REF[@]} -eq 0 ]; then
+  say "  recherche des rendus Epitech sur le poste…"
+  mapfile -t DETECTED < <(
+    find "$HOMEDIR" /media /mnt /run/media -xdev -maxdepth 6 -type d -name .git 2>/dev/null |
+    while IFS= read -r d; do
+      repo="${d%/.git}"
+      url=$(git -C "$repo" config --get remote.origin.url 2>/dev/null || true)
+      if printf '%s %s' "$url" "$(basename "$repo")" \
+         | grep -qiE 'epitech|\b[A-Z]-[A-Z]{2,4}-[0-9]{3}'; then printf '%s\n' "$repo"; fi
+    done | sort -u)
+  if [ "${#DETECTED[@]}" -gt 0 ] && [ -n "${DETECTED[0]:-}" ]; then
+    # les plus récemment travaillés d'abord : sur un poste étudiant il y en a un,
+    # sur un poste de correcteur il y en a des centaines.
+    mapfile -t DETECTED < <(
+      for r in "${DETECTED[@]}"; do
+        t=$(git -C "$r" log --all --format=%at 2>/dev/null | sort -n | tail -1)
+        printf '%s\t%s\n' "${t:-0}" "$r"
+      done | sort -rn | cut -f2-)
+    NDET=${#DETECTED[@]}
+    # une épreuve tient dans une journée : on ne garde que les dépôts travaillés
+    # dans les 48 h du plus récent. Écarte les projets au long cours.
+    NEWEST=$(git -C "${DETECTED[0]}" log --all --format=%at 2>/dev/null | sort -n | tail -1)
+    if [ -n "$NEWEST" ]; then
+      KEEP=()
+      for r in "${DETECTED[@]}"; do
+        t=$(git -C "$r" log --all --format=%at 2>/dev/null | sort -n | tail -1)
+        [ -n "$t" ] && [ "$(date -d "@$t" +%F)" = "$(date -d "@$NEWEST" +%F)" ] && KEEP+=("$r")
+      done
+      [ ${#KEEP[@]} -gt 0 ] && DETECTED=("${KEEP[@]}")
+    fi
+    if [ "$NDET" -gt ${#DETECTED[@]} ]; then
+      say "  $NDET rendus détectés, ${#DETECTED[@]} retenu(s) (travaillés le $(date -d "@$NEWEST" +%F)) :"
+      say "     (--repo pour choisir explicitement)"
+    else
+      say "  $NDET rendu(s) détecté(s) :"
+    fi
+    if [ ${#DETECTED[@]} -gt 8 ]; then DETECTED=("${DETECTED[@]:0:8}"); fi
+    for r in "${DETECTED[@]}"; do
+      say "     $(basename "$r")  [dernier commit $(git -C "$r" log -1 --format=%ad --date=format:'%F %H:%M' 2>/dev/null || echo '?')]"
+    done
+    REPOS_REF=("${DETECTED[@]}")
+  else
+    say "  aucun rendu Epitech détecté sur le poste."
+  fi
+fi
+
+if [ -z "$START_EPOCH" ] && [ "${#REPOS_REF[@]}" -gt 0 ]; then
+  LAST=""
+  for r in "${REPOS_REF[@]}"; do
+    [ -d "$r" ] || continue
+    l=$(git -C "$r" log --all --format=%at 2>/dev/null | sort -n | tail -1)
+    [ -n "$l" ] && { [ -z "$LAST" ] || [ "$l" -gt "$LAST" ]; } && LAST="$l"
+  done
+  if [ -n "$LAST" ]; then
+    # une épreuve tient dans une journée : on prend le jour du dernier commit,
+    # puis le premier commit de CE jour comme borne basse.
+    DAY=$(date -d "@$LAST" '+%Y-%m-%d')
+    FIRSTDAY=""
+    for r in "${REPOS_REF[@]}"; do
+      [ -d "$r" ] || continue
+      f=$(git -C "$r" log --all --format=%at 2>/dev/null \
+          | awk -v d="$(date -d "$DAY 00:00:00" +%s)" -v e="$(date -d "$DAY 23:59:59" +%s)" \
+                '$1>=d && $1<=e' | sort -n | head -1)
+      [ -n "$f" ] && { [ -z "$FIRSTDAY" ] || [ "$f" -lt "$FIRSTDAY" ]; } && FIRSTDAY="$f"
+    done
+    if [ -n "$FIRSTDAY" ]; then
+      START_EPOCH=$(( FIRSTDAY - 3600 ))   # une heure de marge avant le 1er commit
+    else
+      START_EPOCH=$(date -d "$DAY 00:00:00" +%s)
+    fi
+    [ -z "$END_EPOCH" ] && END_EPOCH="$LAST"
+    say ""
+    say "  fenêtre déduite de l'historique git des rendus :"
+    say "     $(date -d "@$START_EPOCH" '+%F %T')  ->  $(date -d "@$END_EPOCH" '+%F %T')"
+    say "     (--start / --end pour l'imposer)"
+  fi
+fi
+
+if [ -z "$START_EPOCH" ] && [ -t 0 ]; then
+  say ""
+  printf "  Heure d'ouverture de l'épreuve [ex. 2026-09-16 10:00] : " >&2
+  read -r _ans </dev/tty || _ans=""
+  [ -n "$_ans" ] && START_EPOCH=$(date -d "$_ans" +%s 2>/dev/null)
+fi
+if [ -z "$START_EPOCH" ]; then
+  warn "impossible de déterminer l'heure d'ouverture de l'épreuve."
+  warn "relancer avec --start '2026-09-16 10:00'"
+  exit 1
+fi
+[ -z "$END_EPOCH" ] && END_EPOCH=$(date +%s)
+[ -n "$EXP_YEAR" ] || EXP_YEAR="$(date -d "@$START_EPOCH" +%Y)"
+
 out "# Relevé forensique — poste \`$(hostname 2>/dev/null || echo inconnu)\`"
 out ""
 out "| | |"
@@ -181,9 +279,6 @@ out "> Ce document **ne conclut pas**. Il présente des faits horodatés."
 out "> La conclusion est une décision humaine, prise en soutenance, avec l'étudiant."
 out ""
 
-say ""
-c '1;37'; say " forensic.sh v$VERSION — relevé lecture seule"; c '0'
-hr
 say "  compte examiné : $TARGET_USER  ($HOMEDIR)"
 say "  épreuve        : $(date -d "@$START_EPOCH" '+%F %T') → $(date -d "@$END_EPOCH" '+%F %T')"
 say "  rapport        : $REPORT"
@@ -199,8 +294,20 @@ for r in "${REPOS_REF[@]:-}"; do [ -n "$r" ] && derive_from_repo "$r"; done
 if [ ${#NAMES[@]} -eq 0 ]; then
   NAMES=( '*.c' '*.h' '*.cpp' '*.hpp' '*.py' '*.java' '*.js' '*.ts' '*.sh'
           'Makefile' 'CMakeLists.txt' '*.zip' '*.tar.gz' '*.tgz' '*.rar' '*.7z' '*.pdf' )
-  step "aucun --repo ni --name : motifs génériques (sources, archives, PDF)"
+  warn "aucun rendu détecté et aucun --name : repli générique, balayage large."
+  warn "préférer --repo <dépôt-rendu> : le ciblage devient précis et rapide."
 fi
+
+# le NAME du Makefile de chaque rendu : c'est le binaire qu'on cherche
+for r in "${REPOS_REF[@]:-}"; do
+  [ -n "$r" ] && [ -f "$r/Makefile" ] || continue
+  bn=$(sed -n 's/^[[:space:]]*NAME[[:space:]]*[:+?]*=[[:space:]]*//p' "$r/Makefile" 2>/dev/null \
+       | head -1 | tr -d " \t")
+  if [ -n "$bn" ]; then
+    NAMES+=("$bn"); SIGS+=("$bn")
+    step "binaire cherché : $bn  (déclaré par $(basename "$r"))"
+  fi
+done
 # dédoublonnage
 mapfile -t NAMES < <(printf '%s\n' "${NAMES[@]}" | sort -u)
 [ ${#SIGS[@]} -gt 0 ] && mapfile -t SIGS < <(printf '%s\n' "${SIGS[@]}" | sort -u)
@@ -295,7 +402,11 @@ phase "Recherche des fichiers candidats"
 PRUNE=( -name proc -o -name sys -o -name dev -o -name run
         -o -name node_modules -o -name .cache -o -name .git
         -o -name snap -o -name .venv -o -name venv -o -name __pycache__
-        -o -name .npm -o -name .cargo -o -name .rustup -o -name .gradle )
+        -o -name .npm -o -name .cargo -o -name .rustup -o -name .gradle
+        -o -name vendor -o -name .nvm -o -name .m2 -o -name .pub-cache
+        -o -name site-packages -o -name dist-packages -o -name .conda
+        -o -name .mozilla -o -name .steam -o -name .gem -o -name .docker
+        -o -name cmake-build-debug -o -name .platformio -o -name .vscode-server )
 
 FIND_NAME=()
 for p in "${NAMES[@]}"; do FIND_NAME+=( -iname "$p" -o ); done
@@ -315,6 +426,13 @@ for root in "${ROOTS[@]}"; do
 done
 sort -u "$RAW" -o "$RAW"
 NRAW=$(wc -l < "$RAW")
+if [ "$NRAW" -gt 20000 ]; then
+  warn "$NRAW candidats — ciblage trop large pour être exploitable."
+  warn "passer --repo <dépôt-rendu>. Je garde les 20000 plus récents."
+  xargs -d '\n' -r ls -td < "$RAW" 2>/dev/null | head -20000 > "$RAW.cap" || true
+  [ -s "$RAW.cap" ] && mv "$RAW.cap" "$RAW"
+  NRAW=$(wc -l < "$RAW")
+fi
 done_phase "$NRAW fichier(s) candidat(s) par le nom"
 
 # recherche par contenu
@@ -348,31 +466,59 @@ say "     (Birth = création de l'inode, Modify = écriture du contenu)"
 
 printf 'birth_epoch\tbirth\taccess\tmodify\tchange\tmtime_epoch\tinode\ttaille\tproprietaire\tzone\tindices\tsha256\tchemin\n' > "$TIMELINE"
 
-i=0; NPRE=0; NIMP=0; NIN=0
-while IFS= read -r f; do
-  i=$((i+1))
-  [ $((i % 20)) -eq 0 ] && tick "horodatage : $i/$NRAW  ($(el))"
-  s=$(stat -c '%W|%X|%Y|%Z|%i|%s|%U' "$f" 2>/dev/null) || continue
-  IFS='|' read -r bE aE mE cE ino sz own <<< "$s"
-  [ "$bE" = "0" ] || [ "$bE" = "-" ] && bE=""
-  case "$f" in
-    "$HOMEDIR"/*|/tmp/*|/var/tmp/*|/media/*|/mnt/*|/run/media/*|/srv/*) zone="ETUDIANT" ;;
-    *) zone="SYSTEME"; [ "$own" = "$TARGET_USER" ] && zone="ETUDIANT" ;;
-  esac
+step "lecture des métadonnées en un seul passage (stat groupé)"
+# %W naissance, %X accès, %Y modif, %Z changement, %i inode, %s taille, %U proprio
+xargs -d '\n' -r stat -c '%W|%X|%Y|%Z|%i|%s|%U|%n' < "$RAW" > "$RAW.stat" 2>/dev/null || true
+NSTAT=$(wc -l < "$RAW.stat")
+step "$NSTAT fichier(s) lus — classement"
+
+LC_ALL=C awk -F'|' -v S="$START_EPOCH" -v E="$END_EPOCH" -v H="$HOMEDIR" -v U="$TARGET_USER" '
+function fmt(t) { return (t>0) ? strftime("%Y-%m-%d %H:%M:%S", t) : "-" }
+{
+  bE=$1+0; aE=$2+0; mE=$3+0; cE=$4+0; ino=$5; sz=$6; own=$7
+  path=$8; for (k=9; k<=NF; k++) path = path "|" $k
+  zone = "SYSTEME"
+  if (index(path,H)==1 || index(path,"/tmp/")==1 || index(path,"/var/tmp/")==1 ||
+      index(path,"/media/")==1 || index(path,"/mnt/")==1 || index(path,"/run/media/")==1 ||
+      index(path,"/srv/")==1 || own==U) zone="ETUDIANT"
   ind=""
-  [ -n "$bE" ] && [ "$bE" -lt "$START_EPOCH" ] && { ind="$ind,INODE-ANTERIEUR-EPREUVE"; NPRE=$((NPRE+1)); }
-  [ "$mE" -lt "$START_EPOCH" ] && ind="$ind,CONTENU-ANTERIEUR-EPREUVE"
-  [ -n "$bE" ] && [ "$mE" -lt "$bE" ] && { ind="$ind,IMPORTE-DATES-PRESERVEES"; NIMP=$((NIMP+1)); }
-  [ -n "$bE" ] && [ "$mE" -gt "$bE" ] && ind="$ind,MODIFIE-APRES-CREATION"
-  [ "$cE" -gt "$mE" ] && ind="$ind,METADONNEES-APRES-ECRITURE"
-  [ "$mE" -ge "$START_EPOCH" ] && [ "$mE" -le "$END_EPOCH" ] && { ind="$ind,ECRIT-PENDANT-EPREUVE"; NIN=$((NIN+1)); }
-  ind="${ind#,}"; [ -z "$ind" ] && ind="-"
-  h=$(sha256sum "$f" 2>/dev/null | cut -c1-16); [ -z "$h" ] && h="-"
-  printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
-    "${bE:-0}" "$([ -n "$bE" ] && date -d "@$bE" '+%F %T' || echo '-')" \
-    "$(date -d "@$aE" '+%F %T')" "$(date -d "@$mE" '+%F %T')" "$(date -d "@$cE" '+%F %T')" \
-    "$mE" "$ino" "$sz" "$own" "$zone" "$ind" "$h" "$f" >> "$TIMELINE"
-done < "$RAW"
+  if (bE>0 && bE<S) { ind=ind ",INODE-ANTERIEUR-EPREUVE"; npre++ }
+  if (mE<S)         ind=ind ",CONTENU-ANTERIEUR-EPREUVE"
+  if (bE>0 && mE<bE){ ind=ind ",IMPORTE-DATES-PRESERVEES"; nimp++ }
+  if (bE>0 && mE>bE)  ind=ind ",MODIFIE-APRES-CREATION"
+  if (cE>mE)          ind=ind ",METADONNEES-APRES-ECRITURE"
+  if (mE>=S && mE<=E){ ind=ind ",ECRIT-PENDANT-EPREUVE"; nin++ }
+  sub(/^,/,"",ind); if (ind=="") ind="-"
+  printf "%d\t%s\t%s\t%s\t%s\t%d\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n", \
+    bE, fmt(bE), fmt(aE), fmt(mE), fmt(cE), mE, ino, sz, own, zone, ind, "-", path
+}
+END { printf "%d %d %d\n", npre, nimp, nin > "/dev/stderr" }
+' "$RAW.stat" >> "$TIMELINE" 2> "$RAW.counts"
+
+read -r NPRE NIMP NIN < "$RAW.counts"
+NPRE=${NPRE:-0}; NIMP=${NIMP:-0}; NIN=${NIN:-0}
+i=$(( $(wc -l < "$TIMELINE") - 1 ))
+
+# sha256 seulement sur ce qui est signalé, et sous 20 Mo : l'empreinte ne sert
+# qu'aux pièces qu'on cite, pas aux 150000 fichiers du disque
+step "empreintes des fichiers signalés uniquement"
+awk -F'\t' 'NR>1 && $10=="ETUDIANT" && $11 ~ /IMPORTE|ANTERIEUR/ {print $13}' "$TIMELINE" > "$RAW.tohash"
+NHASH=$(wc -l < "$RAW.tohash")
+if [ "$NHASH" -gt 0 ] && [ "$NHASH" -le 5000 ]; then
+  : > "$RAW.hashes"
+  while IFS= read -r f; do
+    [ -f "$f" ] && [ "$(stat -c %s "$f" 2>/dev/null || echo 0)" -le 20971520 ] || continue
+    printf '%s\t%s\n' "$(sha256sum "$f" 2>/dev/null | cut -c1-16)" "$f" >> "$RAW.hashes"
+  done < "$RAW.tohash"
+  LC_ALL=C awk -F'\t' 'NR==FNR{h[$2]=$1; next}
+    FNR==1{print; next}
+    { if ($13 in h) $12=h[$13]; print }' OFS='\t' "$RAW.hashes" "$TIMELINE" > "$TIMELINE.new" \
+    && mv "$TIMELINE.new" "$TIMELINE"
+  step "$(wc -l < "$RAW.hashes") empreinte(s) calculée(s)"
+else
+  [ "$NHASH" -gt 5000 ] && warn "$NHASH fichiers signalés : empreintes sautées (ciblage trop large)"
+fi
+rm -f "$RAW.stat" "$RAW.counts" "$RAW.tohash" "$RAW.hashes" 2>/dev/null
 tickend
 done_phase "$i fichier(s) horodaté(s) — $NPRE inode(s) antérieur(s), $NIMP importé(s)"
 
@@ -487,6 +633,89 @@ else
   phase "Sondes profondes — non demandées"
   out "_Non activées. Relancer avec \`--deep\` pour les inodes supprimés et le journal ext4._"
   done_phase "sautées"
+fi
+
+# ══════════════════════════════════════════════════════════════ phase 10 bis
+phase "Le rendu existe-t-il ailleurs sur le poste ?"
+say "     (binaire compilé ou implémentation trouvée hors du dépôt rendu)"
+
+HORS="$OUT/.horsdepot.tsv"
+printf 'type\tinode_ne_le\tcontenu_du\tantérieur\trendu\tchemin\n' > "$HORS"
+N_HORS=0
+
+if [ ${#REPOS_REF[@]} -eq 0 ]; then
+  out "_Aucun rendu de référence : passer \`--repo\`._"
+  done_phase "sautée"
+else
+for r in "${REPOS_REF[@]}"; do
+  [ -n "$r" ] && [ -d "$r" ] || continue
+  rname=$(basename "$r")
+  rreal=$(cd "$r" && pwd -P)
+
+  # 1) le binaire déclaré par le Makefile, compilé ailleurs
+  bn=$(sed -n 's/^[[:space:]]*NAME[[:space:]]*[:+?]*=[[:space:]]*//p' "$r/Makefile" 2>/dev/null \
+       | head -1 | tr -d " \t")
+  if [ -n "$bn" ]; then
+    step "$rname : recherche d'un binaire « $bn » hors du dépôt"
+    while IFS= read -r f; do
+      case "$(cd "$(dirname "$f")" 2>/dev/null && pwd -P)/" in "$rreal"/*) continue ;; esac
+      file -b "$f" 2>/dev/null | grep -qi 'ELF.*executable\|ELF.*shared object' || continue
+      st=$(stat -c '%W|%Y' "$f" 2>/dev/null) || continue
+      bE=${st%|*}; mE=${st#*|}
+      ant="non"; [ "$mE" -lt "$START_EPOCH" ] && ant="OUI"
+      printf 'BINAIRE\t%s\t%s\t%s\t%s\t%s\n' \
+        "$([ "$bE" -gt 0 ] 2>/dev/null && date -d "@$bE" '+%F %T' || echo '-')" \
+        "$(date -d "@$mE" '+%F %T')" "$ant" "$rname" "$f" >> "$HORS"
+      N_HORS=$((N_HORS+1))
+    done < <(find "${ROOTS[@]}" -xdev \( "${PRUNE[@]}" \) -prune -o -type f -name "$bn" -print 2>/dev/null)
+  fi
+
+  # 2) les symboles propres au rendu, trouvés dans un fichier hors du dépôt
+  syms=$(grep -rhoE '^[a-zA-Z_][a-zA-Z0-9_ \*]*\b([a-z_][a-z0-9_]{5,})\(' "$r" 2>/dev/null \
+         | grep -oE '[a-z_][a-z0-9_]{5,}\(' | tr -d '(' \
+         | grep -vE '^(printf|sprintf|fprintf|snprintf|strcmp|strlen|strdup|malloc|memset|memcpy|fgets|fopen|fclose|fwrite|scanf|sscanf|isalpha|islower|isupper|strtol|opendir|readdir|closedir|unlink|write|main)$' \
+         | sort -u | head -25)
+  [ -n "$syms" ] || continue
+  SRE=$(printf '%s|' $syms | sed 's/|$//')
+  step "$rname : recherche de ses symboles hors du dépôt"
+  while IFS= read -r f; do
+    case "$(cd "$(dirname "$f")" 2>/dev/null && pwd -P)/" in "$rreal"/*) continue ;; esac
+    nm=$(grep -coE "\b($SRE)\b" "$f" 2>/dev/null); nm=${nm:-0}
+    [ "$nm" -ge 3 ] || continue
+    st=$(stat -c '%W|%Y' "$f" 2>/dev/null) || continue
+    bE=${st%|*}; mE=${st#*|}
+    ant="non"; [ "$mE" -lt "$START_EPOCH" ] && ant="OUI"
+    printf 'SOURCE(%s symboles)\t%s\t%s\t%s\t%s\t%s\n' "$nm" \
+      "$([ "$bE" -gt 0 ] 2>/dev/null && date -d "@$bE" '+%F %T' || echo '-')" \
+      "$(date -d "@$mE" '+%F %T')" "$ant" "$rname" "$f" >> "$HORS"
+    N_HORS=$((N_HORS+1))
+  done < "$CAND"
+done
+
+N_HORS_ANT=$(awk -F'\t' 'NR>1 && $4=="OUI"' "$HORS" | wc -l)
+out "On cherche, **hors du dépôt rendu**, le binaire que son \`Makefile\` déclare et les"
+out "fonctions qu'il définit. Un exemplaire trouvé ailleurs **et antérieur à l'épreuve**"
+out "est le fait le plus direct que ce relevé puisse produire."
+out ""
+out "| | |"
+out "|---|---:|"
+out "| Exemplaires trouvés hors du rendu | **$N_HORS** |"
+out "| dont **antérieurs à l'épreuve** | **$N_HORS_ANT** |"
+out ""
+if [ "$N_HORS" -gt 0 ]; then
+  out "| Type | Inode né le | Contenu du | Antérieur | Rendu concerné | Chemin |"
+  out "|---|---|---|:-:|---|---|"
+  sort -t$'\t' -k4,4r -k3,3 "$HORS" | awk -F'\t' 'NR>0 && $1!="type" {
+      printf "| %s | %s | %s | %s | `%s` | `%s` |\n",$1,$2,$3,$4,$5,$6 }' | head -50 >> "$REPORT"
+  out ""
+  [ "$N_HORS_ANT" -gt 0 ] && out "> **$N_HORS_ANT exemplaire(s) antérieur(s) à l'épreuve.** À faire constater à l'étudiant, et à lui faire expliquer."
+else
+  out "**Rien trouvé hors du dépôt rendu.** Ni binaire compilé, ni fichier reprenant les"
+  out "fonctions du rendu. C'est un résultat, pas une absence de résultat : sur ce poste,"
+  out "le code du rendu n'existe qu'à un seul endroit."
+fi
+out ""
+done_phase "$N_HORS exemplaire(s) hors dépôt, dont $N_HORS_ANT antérieur(s)"
 fi
 
 # ══════════════════════════════════════════════════════════════════ phase 11
@@ -735,7 +964,32 @@ ANALYSE="$OUT/analyse.txt"
   echo "   apporte (cp -p, tar -x, git clone, cle USB) et non ecrit sur place."
   echo
   echo "───────────────────────────────────────────────────────────────────────"
-  echo " 2. MARQUEURS DE PROVENANCE DANS LE CODE"
+  echo " 2. LE RENDU EXISTE-T-IL AILLEURS SUR LE POSTE ?"
+  echo "───────────────────────────────────────────────────────────────────────"
+  echo
+  if [ -s "$HORS" ] && [ "${N_HORS:-0}" -gt 0 ]; then
+    printf '   %-42s %8s\n' 'Exemplaires trouves hors du rendu'  "${N_HORS:-0}"
+    printf '   %-42s %8s\n' "dont ANTERIEURS a l'epreuve"        "${N_HORS_ANT:-0}"
+    echo
+    printf '     %-22s %-19s %-9s %s\n' TYPE 'CONTENU DU' 'ANTERIEUR' 'CHEMIN'
+    sort -t$'\t' -k4,4r -k3,3 "$HORS" | awk -F'\t' '$1!="type" {
+        printf "     %-22s %-19s %-9s %s\n", $1, $3, $4, $6 }' | head -40
+    echo
+    if [ "${N_HORS_ANT:-0}" -gt 0 ]; then
+      echo "   >> ${N_HORS_ANT} exemplaire(s) ANTERIEUR(S) a l'epreuve."
+      echo "      C'est le fait le plus direct de ce releve : le code du rendu"
+      echo "      existait deja sur la machine avant l'ouverture de l'epreuve."
+      echo "      A faire constater a l'etudiant et a lui faire expliquer."
+    fi
+  else
+    echo "   Rien trouve hors du depot rendu : ni binaire compile, ni fichier"
+    echo "   reprenant les fonctions du rendu."
+    echo "   C'est un resultat, pas une absence de resultat : sur ce poste, le"
+    echo "   code du rendu n'existe qu'a un seul endroit."
+  fi
+  echo
+  echo "───────────────────────────────────────────────────────────────────────"
+  echo " 3. MARQUEURS DE PROVENANCE DANS LE CODE"
   echo "───────────────────────────────────────────────────────────────────────"
   echo
   printf '   %-42s %8s\n' 'Fichiers source analyses'      "$NMARKF"
@@ -769,7 +1023,7 @@ ANALYSE="$OUT/analyse.txt"
   fi
   echo
   echo "───────────────────────────────────────────────────────────────────────"
-  echo " 3. CANDIDATS LES PLUS PARLANTS — ZONE ETUDIANT"
+  echo " 4. CANDIDATS LES PLUS PARLANTS — ZONE ETUDIANT"
   echo "───────────────────────────────────────────────────────────────────────"
   echo
   if [ "$NSHOWN" -eq 0 ]; then
@@ -790,7 +1044,7 @@ ANALYSE="$OUT/analyse.txt"
   fi
   echo
   echo "───────────────────────────────────────────────────────────────────────"
-  echo " 4. CE QUE CE DOCUMENT N'ETABLIT PAS"
+  echo " 5. CE QUE CE DOCUMENT N'ETABLIT PAS"
   echo "───────────────────────────────────────────────────────────────────────"
   echo
   echo "   Ce releve NE CONCLUT PAS. Il presente des faits horodates."
@@ -811,7 +1065,7 @@ ANALYSE="$OUT/analyse.txt"
   echo "   travail fait sur une autre machine, ne laisse rien derriere lui."
   echo
   echo "───────────────────────────────────────────────────────────────────────"
-  echo " 5. EMPREINTES — PROCES-VERBAL"
+  echo " 6. EMPREINTES — PROCES-VERBAL"
   echo "───────────────────────────────────────────────────────────────────────"
   echo
   ( cd "$OUT" && sha256sum RAPPORT.md chronologie.tsv candidats.txt 2>/dev/null | sed 's/^/   /' )
