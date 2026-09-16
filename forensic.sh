@@ -15,7 +15,7 @@ VERSION="2.0"
 
 # ─────────────────────────────────────────────────────────────── paramètres
 START=""; END=""; TARGET_USER=""; OUT=""
-DEEP=0; QUICK=0; ALL_FS=0; MAX_REPOS=200
+DEEP=0; QUICK=0; ALL_FS=0; MAX_REPOS=200; EXP_YEAR=""; EXP_MODULE=""
 EXTRA_ROOTS=(); SIGS=(); NAMES=(); REPOS_REF=()
 
 usage() {
@@ -40,6 +40,12 @@ CIBLAGE (tout est optionnel — sans rien, le script reste générique)
                     de fichiers et les symboles à rechercher. Répétable.
   --name MOTIF      motif de nom de fichier supplémentaire, répétable (ex. '*cesar*')
   --signature MOT   motif de contenu supplémentaire, répétable (ex. 'write_crypt')
+
+MARQUEURS DE PROVENANCE (analyse du code lui-même)
+  --year YYYY       année attendue dans l'en-tête EPITECH
+                    (défaut : année de --start)
+  --module CODE     module attendu, ex. G-CPE-210. Le script signale tout
+                    fichier qui porte un autre module (B-CPE-210, B-PSU-100…)
 
 PROFONDEUR
   --deep            inodes supprimés (debugfs), journal ext4, instantanés btrfs
@@ -69,6 +75,8 @@ while [ $# -gt 0 ]; do
     --deep)       DEEP=1; shift ;;
     --quick)      QUICK=1; shift ;;
     --max-repos)  MAX_REPOS="${2:-200}"; shift 2 ;;
+    --year)       EXP_YEAR="${2:-}"; shift 2 ;;
+    --module)     EXP_MODULE="${2:-}"; shift 2 ;;
     -h|--help)    usage; exit 0 ;;
     *) echo "option inconnue : $1" >&2; echo "  --help pour l'aide" >&2; exit 1 ;;
   esac
@@ -90,6 +98,8 @@ fi
 HOMEDIR="$(getent passwd "$TARGET_USER" 2>/dev/null | cut -d: -f6)"
 [ -n "$HOMEDIR" ] || HOMEDIR="/home/$TARGET_USER"
 
+[ -n "$EXP_YEAR" ] || EXP_YEAR="$(date -d "@$START_EPOCH" +%Y)"
+
 OUT="${OUT:-./releve-$(hostname 2>/dev/null || echo poste)-$(date +%Y%m%d-%H%M%S)}"
 mkdir -p "$OUT/copies" || { echo "ERREUR : impossible d'écrire dans $OUT" >&2; exit 1; }
 OUT="$(cd "$OUT" && pwd)"
@@ -97,7 +107,7 @@ REPORT="$OUT/RAPPORT.md"; TIMELINE="$OUT/chronologie.tsv"; CAND="$OUT/candidats.
 : > "$REPORT"; : > "$CAND"
 
 # ───────────────────────────────────────────────────── affichage et journal
-T0=$(date +%s); PHASE_T0=$T0; PHASE_N=0; NPHASES=11
+T0=$(date +%s); PHASE_T0=$T0; PHASE_N=0; NPHASES=12
 is_tty() { [ -t 2 ]; }
 c() { is_tty && printf '\033[%sm' "$1" >&2 || true; }
 say()  { printf '%s\n' "$*" >&2; }
@@ -164,6 +174,8 @@ out "| Fenêtre de l'épreuve | $(date -d "@$START_EPOCH" '+%Y-%m-%d %H:%M:%S') 
 out "| Périmètre | $([ $ALL_FS -eq 1 ] && echo 'tout le système de fichiers' || echo 'zones étudiant') |"
 out "| Recherche par contenu | $([ $QUICK -eq 1 ] && echo 'sautée (--quick)' || echo 'active') |"
 out "| Sondes lourdes | $([ $DEEP -eq 1 ] && echo 'actives (--deep)' || echo 'inactives') |"
+out "| Année attendue en en-tête | $EXP_YEAR |"
+out "| Module attendu | ${EXP_MODULE:-_non précisé (\`--module\`)_} |"
 out ""
 out "> Ce document **ne conclut pas**. Il présente des faits horodatés."
 out "> La conclusion est une décision humaine, prise en soutenance, avec l'étudiant."
@@ -477,6 +489,116 @@ else
   done_phase "sautées"
 fi
 
+# ══════════════════════════════════════════════════════════════════ phase 11
+phase "Marqueurs de provenance dans le code"
+say "     (en-tête EPITECH, module, convention de nommage ft_ / my_)"
+
+MARK="$OUT/.markers.tsv"
+printf 'annee\tmodule\tft\tmy\tanomalies\tchemin\n' > "$MARK"
+
+# fichiers source de la zone étudiant, + ceux des dépôts passés en --repo
+{
+  awk -F'\t' 'NR>1 && $10=="ETUDIANT" {print $13}' "$TIMELINE"
+  for r in "${REPOS_REF[@]:-}"; do
+    [ -n "$r" ] && [ -d "$r" ] && find "$r" -type f \( -name '*.c' -o -name '*.h' \) 2>/dev/null
+  done
+} | grep -E '\.(c|h|cpp|hpp)$' | sort -u > "$MARK.files"
+
+NMARKF=$(wc -l < "$MARK.files")
+step "$NMARKF fichier(s) source à analyser"
+
+i=0; N_YEAR=0; N_MOD=0; N_FT=0
+while IFS= read -r f; do
+  i=$((i+1))
+  [ $((i % 25)) -eq 0 ] && tick "marqueurs : $i/$NMARKF  ($(el))"
+  [ -r "$f" ] || continue
+  head -c 8000 "$f" > "$MARK.head" 2>/dev/null || continue
+
+  yrs=$(grep -oE 'EPITECH PROJECT, *[0-9]{4}' "$MARK.head" 2>/dev/null \
+        | grep -oE '[0-9]{4}' | sort -u | paste -sd',' -)
+  mods=$(grep -oE '\b[A-Z]-[A-Z]{2,4}-[0-9]{3}\b' "$MARK.head" 2>/dev/null \
+        | sort -u | paste -sd',' -)
+  ft=$(grep -coE '\bft_[a-z_0-9]+' "$f" 2>/dev/null); ft=${ft:-0}
+  my=$(grep -coE '\bmy_[a-z_0-9]+' "$f" 2>/dev/null); my=${my:-0}
+
+  an=""
+  if [ -n "$yrs" ]; then
+    case ",$yrs," in
+      *",$EXP_YEAR,"*) ;;
+      *) an="$an,ANNEE-INATTENDUE($yrs)"; N_YEAR=$((N_YEAR+1)) ;;
+    esac
+  fi
+  if [ -n "$EXP_MODULE" ] && [ -n "$mods" ]; then
+    case ",$mods," in
+      *",$EXP_MODULE,"*) ;;
+      *) an="$an,MODULE-INATTENDU($mods)"; N_MOD=$((N_MOD+1)) ;;
+    esac
+  fi
+  if [ "$ft" -gt 0 ]; then an="$an,PREFIXE-FT($ft)"; N_FT=$((N_FT+1)); fi
+  an="${an#,}"; [ -z "$an" ] && an="-"
+
+  printf '%s\t%s\t%s\t%s\t%s\t%s\n' "${yrs:--}" "${mods:--}" "$ft" "$my" "$an" "$f" >> "$MARK"
+done < "$MARK.files"
+tickend
+rm -f "$MARK.head"
+
+N_ANO=$(awk -F'\t' 'NR>1 && $5!="-"' "$MARK" | wc -l)
+TOT_FT=$(awk -F'\t' 'NR>1 {n+=$3} END{print n+0}' "$MARK")
+TOT_MY=$(awk -F'\t' 'NR>1 {n+=$4} END{print n+0}' "$MARK")
+
+out "Trois marqueurs, lus dans le code lui-même. Aucun ne conclut seul ;"
+out "c'est leur **concentration sur un même auteur ou un même fichier** qui parle."
+out ""
+out "| Marqueur | Ce qu'il signale |"
+out "|---|---|"
+out "| \`ANNEE-INATTENDUE\` | l'en-tête \`EPITECH PROJECT, AAAA\` ne porte pas $EXP_YEAR. Le tampon d'année est posé par le greffon d'éditeur **à la création du fichier** : une autre année veut dire que le fichier, ou le modèle dont il est issu, est plus ancien. |"
+out "| \`MODULE-INATTENDU\` | l'en-tête porte un autre module que \`${EXP_MODULE:-celui attendu}\`. Un \`B-CPE-210\` dans un projet \`G-CPE-210\` vient d'un modèle recopié. |"
+out "| \`PREFIXE-FT\` | \`ft_*\` est la convention de nommage de **42** ; Epitech utilise \`my_*\`. |"
+out ""
+out "### Relevé global"
+out ""
+out "| | |"
+out "|---|---:|"
+out "| Fichiers source analysés | $NMARKF |"
+out "| Année d'en-tête inattendue | **$N_YEAR** |"
+out "| Module inattendu | **$N_MOD** |"
+out "| Fichiers employant \`ft_\` | **$N_FT** |"
+out "| Occurrences \`ft_\` / \`my_\` | $TOT_FT / $TOT_MY |"
+out ""
+
+if [ "$N_ANO" -gt 0 ]; then
+  out "### Fichiers porteurs d'au moins un marqueur"
+  out ""
+  out "| Année | Module | \`ft_\` | \`my_\` | Anomalies | Chemin |"
+  out "|---|---|--:|--:|---|---|"
+  awk -F'\t' 'NR>1 && $5!="-" {n=split($5,a,","); printf "%d\t%s\t%s\t%s\t%s\t%s\t%s\n",n,$1,$2,$3,$4,$5,$6}' "$MARK" \
+    | sort -t$'\t' -k1,1nr -k2,2 \
+    | awk -F'\t' '{printf "| %s | %s | %s | %s | `%s` | `%s` |\n",$2,$3,$4,$5,$6,$7}' \
+    | head -60 >> "$REPORT"
+  out ""
+  out "_$N_ANO fichier(s) concerné(s)._"
+else
+  out "**Aucun marqueur de provenance relevé.** En-têtes, modules et conventions de"
+  out "nommage sont homogènes sur les $NMARKF fichiers analysés."
+fi
+out ""
+out "### Répartition des années d'en-tête"
+out ""
+out "| Année | Fichiers |"
+out "|---|--:|"
+awk -F'\t' 'NR>1 && $1!="-" {split($1,y,","); for(k in y) n[y[k]]++}
+            END{for(a in n) printf "| %s | %d |\n", a, n[a]}' "$MARK" | sort >> "$REPORT"
+out ""
+out "### Répartition des modules déclarés"
+out ""
+out "| Module | Fichiers |"
+out "|---|--:|"
+awk -F'\t' 'NR>1 && $2!="-" {split($2,m,","); for(k in m) n[m[k]]++}
+            END{for(a in n) printf "| %s | %d |\n", a, n[a]}' "$MARK" | sort >> "$REPORT"
+out ""
+
+done_phase "$NMARKF fichier(s) analysés — $N_ANO porteur(s) de marqueur"
+
 # ════════════════════════════════════════════════════════════════ synthèse
 phase "Synthèse"
 
@@ -581,6 +703,127 @@ out "et de l'étudiant ; empreintes ci-dessous ; déclaration de l'étudiant tel
 out ""
 { cd "$OUT" && sha256sum RAPPORT.md chronologie.tsv candidats.txt 2>/dev/null; } | pre
 
+# ─────────────────────────────────────────────── analyse.txt (texte brut)
+ANALYSE="$OUT/analyse.txt"
+{
+  echo "═══════════════════════════════════════════════════════════════════════"
+  echo " ANALYSE FORENSIQUE — poste $(hostname 2>/dev/null || echo inconnu)"
+  echo "═══════════════════════════════════════════════════════════════════════"
+  echo
+  echo "  Relevé du      : $(date '+%Y-%m-%d %H:%M:%S %Z')"
+  echo "  Compte examiné : $TARGET_USER  ($HOMEDIR)"
+  echo "  Épreuve        : $(date -d "@$START_EPOCH" '+%F %T')  ->  $(date -d "@$END_EPOCH" '+%F %T')"
+  echo "  Année attendue : $EXP_YEAR"
+  echo "  Module attendu : ${EXP_MODULE:-(non précisé)}"
+  echo "  Durée          : $(el)"
+  echo
+  echo "───────────────────────────────────────────────────────────────────────"
+  echo " 1. DATES DES FICHIERS"
+  echo "───────────────────────────────────────────────────────────────────────"
+  echo
+  printf '   %-42s %8s %8s\n' '' 'TOTAL' 'ETUDIANT'
+  printf '   %-42s %8s %8s\n' '------------------------------------------' '--------' '--------'
+  printf '   %-42s %8s %8s\n' 'Fichiers candidats'                    "$TOT"     "$NETU"
+  printf '   %-42s %8s %8s\n' "Inode anterieur a l'epreuve"           "$A_INODE" "$AZ_INODE"
+  printf '   %-42s %8s %8s\n' "Contenu anterieur a l'epreuve"         "$A_CONT"  "$AZ_CONT"
+  printf '   %-42s %8s %8s\n' 'IMPORTE (dates preservees)'            "$A_IMP"   "$AZ_IMP"
+  printf '   %-42s %8s %8s\n' "Ecrit pendant l'epreuve"               "$A_PEND"  "$AZ_PEND"
+  printf '   %-42s %8s %8s\n' 'Metadonnees modifiees apres ecriture'  "$A_META"  "$AZ_META"
+  echo
+  echo "   IMPORTE-DATES-PRESERVEES est l'indice le plus parlant : le contenu"
+  echo "   est plus vieux que l'inode qui le porte, donc le fichier a ete"
+  echo "   apporte (cp -p, tar -x, git clone, cle USB) et non ecrit sur place."
+  echo
+  echo "───────────────────────────────────────────────────────────────────────"
+  echo " 2. MARQUEURS DE PROVENANCE DANS LE CODE"
+  echo "───────────────────────────────────────────────────────────────────────"
+  echo
+  printf '   %-42s %8s\n' 'Fichiers source analyses'      "$NMARKF"
+  printf '   %-42s %8s\n' "Annee d'en-tete inattendue"    "$N_YEAR"
+  printf '   %-42s %8s\n' 'Module inattendu'              "$N_MOD"
+  printf '   %-42s %8s\n' 'Fichiers employant ft_'        "$N_FT"
+  printf '   %-42s %8s\n' 'Occurrences ft_'               "$TOT_FT"
+  printf '   %-42s %8s\n' 'Occurrences my_'               "$TOT_MY"
+  echo
+  echo "   Annees d'en-tete relevees :"
+  awk -F'\t' 'NR>1 && $1!="-" {split($1,y,","); for(k in y) n[y[k]]++}
+              END{for(a in n) printf "     %-8s %d fichier(s)\n", a, n[a]}' "$MARK" | sort
+  echo
+  echo "   Modules declares :"
+  awk -F'\t' 'NR>1 && $2!="-" {split($2,m,","); for(k in m) n[m[k]]++}
+              END{for(a in n) printf "     %-14s %d fichier(s)\n", a, n[a]}' "$MARK" | sort
+  echo
+  if [ "$N_ANO" -gt 0 ]; then
+    echo "   Fichiers porteurs d'au moins un marqueur :"
+    echo
+    printf '     %-6s %-12s %4s %4s  %s\n' ANNEE MODULE 'ft_' 'my_' 'CHEMIN / ANOMALIES'
+    awk -F'\t' 'NR>1 && $5!="-" {n=split($5,a,","); printf "%d\t%s\t%s\t%s\t%s\t%s\t%s\n",n,$1,$2,$3,$4,$5,$6}' "$MARK" \
+    | sort -t$'\t' -k1,1nr -k2,2 | head -60 \
+    | awk -F'\t' '{
+        printf "     %-6s %-12s %4s %4s  %s\n", $2, $3, $4, $5, $7
+        printf "     %-6s %-12s %4s %4s    -> [%s marqueur(s)] %s\n", "", "", "", "", $1, $6
+      }' 
+  else
+    echo "   Aucun marqueur de provenance releve."
+    echo "   En-tetes, modules et conventions de nommage sont homogenes."
+  fi
+  echo
+  echo "───────────────────────────────────────────────────────────────────────"
+  echo " 3. CANDIDATS LES PLUS PARLANTS — ZONE ETUDIANT"
+  echo "───────────────────────────────────────────────────────────────────────"
+  echo
+  if [ "$NSHOWN" -eq 0 ]; then
+    echo "   Aucun fichier de la zone etudiant n'est anterieur a l'epreuve"
+    echo "   ni porteur de dates preservees."
+  else
+    printf '     %-19s %-19s %10s  %s\n' 'ECRIT LE (Modify)' 'CREE LE (Birth)' 'TAILLE' 'CHEMIN'
+    awk -F'\t' '
+      NR>1 && $10=="ETUDIANT" && ($11 ~ /IMPORTE|ANTERIEUR/) {
+        prio = ($11 ~ /IMPORTE/) ? 0 : 1
+        printf "%d\t%s\t%s\t%s\t%s\t%s\t%s\n", prio, $6, $4, $2, $8, $11, $13
+      }' "$TIMELINE" \
+    | sort -t$'\t' -k1,1n -k2,2n | head -40 \
+    | awk -F'\t' '{ printf "     %-19s %-19s %10s  %s\n", $3, $4, $5, $7; printf "     %-19s %-19s %10s    -> %s\n","","","",$6 }'
+    echo
+    echo "   $NSHOWN fichier(s) concerne(s) ; les 40 premiers sont listes."
+    echo "   Tableau complet : chronologie.tsv"
+  fi
+  echo
+  echo "───────────────────────────────────────────────────────────────────────"
+  echo " 4. CE QUE CE DOCUMENT N'ETABLIT PAS"
+  echo "───────────────────────────────────────────────────────────────────────"
+  echo
+  echo "   Ce releve NE CONCLUT PAS. Il presente des faits horodates."
+  echo "   La conclusion est une decision humaine, prise en soutenance,"
+  echo "   avec l'etudiant present."
+  echo
+  echo "   Objections legitimes a prevoir :"
+  echo "     - \"J'ai copie mes fichiers depuis ma cle.\"  Recevable : ce qui"
+  echo "       compte est la date du CONTENU sur la cle. La relever aussi"
+  echo "       (--root /media/...)."
+  echo "     - \"Un cp -p garde les vieilles dates.\"  Exact, et c'est"
+  echo "       precisement ce que IMPORTE-DATES-PRESERVEES designe."
+  echo "     - \"L'horloge etait fausse.\"  Verifiable : voir RAPPORT.md."
+  echo "     - \"Ces dates viennent de votre scan.\"  Non pour Modify, Change"
+  echo "       et Birth. Possiblement oui pour Access : c'est dit."
+  echo
+  echo "   L'absence de trace ne prouve rien : un rm suivi d'ecritures, ou un"
+  echo "   travail fait sur une autre machine, ne laisse rien derriere lui."
+  echo
+  echo "───────────────────────────────────────────────────────────────────────"
+  echo " 5. EMPREINTES — PROCES-VERBAL"
+  echo "───────────────────────────────────────────────────────────────────────"
+  echo
+  ( cd "$OUT" && sha256sum RAPPORT.md chronologie.tsv candidats.txt 2>/dev/null | sed 's/^/   /' )
+  echo
+  echo "   A faire signer : date, heure, lieu, numero du poste ; noms du staff"
+  echo "   present et de l'etudiant ; les empreintes ci-dessus ; la declaration"
+  echo "   de l'etudiant telle qu'il la formule."
+  echo
+  echo "═══════════════════════════════════════════════════════════════════════"
+} > "$ANALYSE"
+
+rm -f "$MARK.files" 2>/dev/null
 rm -f "$RAW" "$RAW.sig" 2>/dev/null
 done_phase "synthèse écrite"
 
@@ -617,6 +860,7 @@ else
   c '0;32'; printf '   %s\n' "Aucun fichier de la zone etudiant n'est anterieur ni importe." >&2; c '0'
 fi
 printf '\n' >&2
+c '1;37'; printf '   Analyse      %s\n' "$ANALYSE" >&2; c '0'
 printf '   Rapport      %s\n' "$REPORT" >&2
 printf '   Chronologie  %s\n' "$TIMELINE" >&2
 printf '   Copies       %s/copies\n' "$OUT" >&2

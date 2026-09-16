@@ -48,6 +48,8 @@ Sans `--repo`, il reste **générique** : sources tous langages, archives, PDF.
 | `--root DIR` | racine supplémentaire, répétable (clé de l'étudiant, disque externe) |
 | `--all` | balayer tout le disque (défaut : zones étudiant) |
 | `--out DIR` | dossier du rapport — sur la clé USB du staff de préférence |
+| `--year YYYY` | année attendue dans l'en-tête EPITECH (défaut : année de `--start`) |
+| `--module CODE` | module attendu, ex. `G-CPE-210` |
 | `--deep` | inodes supprimés (`debugfs`), journal ext4, instantanés btrfs |
 | `--quick` | saute la recherche par contenu (~1 min au lieu de ~10) |
 
@@ -63,14 +65,43 @@ Sans `--repo`, il reste **générique** : sources tous langages, archives, PDF.
 Si l'enjeu est disciplinaire lourd, ne pas travailler sur la machine vivante : faire
 une image disque depuis un live USB et analyser la copie. Chaque démarrage écrase des traces.
 
+## Marqueurs de provenance dans le code
+
+Le relevé lit aussi **le code lui-même**. Trois marqueurs, dont aucun ne conclut seul :
+c'est leur **concentration sur un même fichier ou un même auteur** qui parle.
+
+| Marqueur | Ce qu'il signale |
+|---|---|
+| `ANNEE-INATTENDUE` | l'en-tête `EPITECH PROJECT, AAAA` ne porte pas l'année attendue. Le tampon est posé par le greffon d'éditeur **à la création du fichier** : une autre année veut dire que le fichier, ou le modèle dont il est issu, est plus ancien. |
+| `MODULE-INATTENDU` | l'en-tête porte un autre module que celui de l'épreuve. Un `B-CPE-210` dans un projet `G-CPE-210` vient d'un modèle recopié. |
+| `PREFIXE-FT` | `ft_*` est la convention de nommage de **42** ; Epitech utilise `my_*`. |
+
+```bash
+sudo ./forensic.sh --start '2026-09-16 10:00' --year 2026 --module G-CPE-210
+```
+
+Les fichiers sont classés **par nombre de marqueurs décroissant** : celui qui les porte
+tous les trois arrive en tête.
+
+```
+ANNEE  MODULE        ft_  my_  CHEMIN / ANOMALIES
+2024   B-CPE-210       3    0  .../stumper6-4/utils.c
+                                 -> [3 marqueur(s)] ANNEE-INATTENDUE(2024),MODULE-INATTENDU(B-CPE-210),PREFIXE-FT(3)
+```
+
 ## Ce que produit le relevé
 
 ```
-RAPPORT.md         le document à lire et à joindre au dossier
+analyse.txt        LE RÉSUMÉ À LIRE — texte brut, tout y est
+RAPPORT.md         le document détaillé, à joindre au dossier
 chronologie.tsv    une ligne par fichier candidat, à ouvrir en tableur
 candidats.txt      liste brute des chemins retenus
 copies/            historiques shell, corbeille, bases VS Code et navigateurs
 ```
+
+`analyse.txt` reprend en cinq sections : les dates des fichiers, les marqueurs de
+provenance, les candidats les plus parlants, ce que le relevé n'établit pas, et les
+empreintes pour le procès-verbal.
 
 ### Les quatre dates
 
