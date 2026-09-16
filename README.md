@@ -23,13 +23,35 @@ La procédure complète, la lecture des quatre dates et les objections à prévo
 
 ## Lancer sur le poste de l'étudiant
 
-Le script n'a **rien à installer** et n'écrit rien sur le disque du poste : il est
-exécuté depuis le flux réseau, et son rapport part sur la clé USB du staff.
+```bash
+git clone https://github.com/edwinfranck/stumper-forensics.git
+cd stumper-forensics
+chmod +x releve.sh
+sudo ./releve.sh
+```
+
+Les dates de l'épreuve et les motifs propres aux sujets se règlent une fois dans
+[`epreuve.conf`](epreuve.conf) :
+
+```sh
+START='2026-09-16 10:00'
+END='2026-09-16 14:00'
+SIGNATURES='crocus g_digit_font tictactoe cesar write_crypt pokemon roster_t'
+```
+
+`releve.sh` se relance seul avec `sudo`, **cherche une clé USB inscriptible** et y écrit
+le rapport. S'il n'en trouve pas, il prévient et demande confirmation avant d'écrire sur
+le disque du poste — c'est la pièce à conviction, on évite d'y toucher.
+
+Tout argument supplémentaire est passé au script principal : `sudo ./releve.sh --deep`,
+`sudo ./releve.sh --root /media/etudiant/SA_CLE`.
+
+### Variante sans rien écrire sur le poste
+
+Si le poste a le réseau et que vous ne voulez **aucune** écriture sur son disque, pas même
+un clone :
 
 ```bash
-# 1. brancher la clé du staff, repérer son point de montage (ex. /media/staff/CLE)
-# 2. une seule commande, rien n'atterrit sur le disque du poste :
-
 curl -sL https://raw.githubusercontent.com/edwinfranck/stumper-forensics/main/stumper_forensics.sh \
   | sudo bash -s -- \
       --start '2026-09-16 10:00' \
@@ -40,9 +62,6 @@ curl -sL https://raw.githubusercontent.com/edwinfranck/stumper-forensics/main/st
 
 > `--start` est **l'option qui fait tout le travail** : sans l'heure d'ouverture de
 > l'épreuve, aucun classement d'antériorité n'est possible.
-
-Sans réseau sur le poste, copier `stumper_forensics.sh` sur la clé et le lancer
-depuis la clé — jamais depuis le disque du poste.
 
 ## Options
 
